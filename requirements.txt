@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+langgraph
+langchain-google-vertexai
+pinecone-client
+pydantic-settings
+python-dotenv
+googlemaps
