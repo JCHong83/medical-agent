@@ -1,38 +1,73 @@
+import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 from app.schemas.state import AgentState, SpecialtyDecision
+from langchain_core.messages import SystemMessage
 from dotenv import load_dotenv
 
 load_dotenv()
+
 class RoutingAgent:
   def __init__(self):
-    # Using Gemini1.5 Pro for better clinical reasoning
-    self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
+    # Using Gemini 2.0 Pro for the heavy lifting of medical logic
+    self.llm = ChatGoogleGenerativeAI(
+      model="gemini-2.0-pro",
+      temperature=0
+    )
     self.structured_llm = self.llm.with_structured_output(SpecialtyDecision)
 
   async def call_node(self, state: AgentState):
-    # 1. Check if the Intake Agent alredy flagged an emergency
+    """
+    LangGraph Node: Determines the medical specialty and sets up the search context.
+    """
+    # Early Exit for emergencies
+    # If the intake agent or previous logic already flagged an emergency, we stop here.
     if state.get("emergency_flag"):
-      return {"specialty_required": "EMERGENCY_SERVICES"}
+      print("[RoutingAgent] Emergency flag detected. Routing to Emergency Services.")
+      return {"specialty_required": "Emergency Room"}
     
-    # 2. Prepare the prompt for specialty matching
-    symptoms_str = ", ".join(state["symptoms"])
+    # Extract context from State
+    symptoms_str = ", ".join(state.get["symptoms", []])
+    if not symptoms_str:
+      symptoms_str = "No specificc symptoms reported"
+
     system_prompt = (
-      "You are a medical routing expert. Based on the patient's symptoms, "
-      "determine the single most appropriate medical specialty. "
-      "Common specialties: Cardiology, Dermatology, Orthopedics, "
-      "Neurology, Pediatrics, Ophthalmology, Gastroenterology, General Practice."
+      "You are a medical routing expert. Your task is to match symptoms to the "
+      "standard medical specialty that should treat them. Use standard names "
+      "suitable for a map search (e.g., 'Cardiologist', 'Dermatologist', 'Pediatrician')"
     )
 
-    user_prompt = f"Symptoms: {symptoms_str}. Duration: {state['duration']}. Severity: {state['severity']}."
+    user_prompt = (
+      f"Patient Data:\n"
+      f"- Symptoms: {symptoms_str}\n"
+      f"- Duration: {state.get('duration', 'unknown')}\n"
+      f"- Severity: {state.get('severity', 'moderate')}"
+    )
 
-    # 3. Get the decision
-    decision = await self.structured_llm.ainvoke([
-      ("system", system_prompt),
-      ("human", user_prompt)
-    ])
+    try:
+      # Get Structured Decision
+      decision: SpecialtyDecision = await self.structured_llm.ainvoke([
+        SystemMessage(content=system_prompt),
+        ("human", user_prompt)
+      ])
 
-    # 4. Handle a situatjion where the LLM might still find an emergency
-    if decision.is_emergency:
-      return {"specialty_required": "EMERGENCY_SERVICES", "emergency_flag": True}
+      # Double check for emergency logic wthin this node
+      if decision.is_emergency:
+        return {
+          "specialty_required": "Emergency Room",
+          "emergency_flag": True
+        }
+      
+      # Clean up the specialty name for API compatibility
+      # Ensure it's a searchable string (e.g., 'Dermatologist' instead of 'Dermatology')
+      specialty = decision.specialty.strip()
+
+      print(f"[RoutingAgent] Specialty Decided: {specialty}. Reason: {decision.reasoning}")
+      
+      return {
+        "specialty_required": specialty
+      }
     
-    return {"specialty_required": decision.specialty}
+    except Exception as e:
+      print(f"Error in RoutingAgent: {e}")
+      # Fallback to General Practice f reasoning fails
+      return {"specialty_required": "General Practitioner"}

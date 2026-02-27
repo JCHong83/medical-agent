@@ -1,26 +1,43 @@
 import googlemaps
 import os
 from dotenv import load_dotenv
+from typing import List, Dict, Any
 
 load_dotenv()
 
 class MapsService:
   def __init__(self):
-    self.gmaps = googlemaps.Client(key=os.getenv("GOOGLE_MAPS_API_KEY"))
+    api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+    if not api_key:
+      print("⚠️ WARNING: GOOGLE_MAPS_API_KEY not found in environment.")
+    self.gmaps = googlemaps.Client(key=api_key) if api_key else None
 
-  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 5000):
+  async def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 10000) -> List[Dict[str, Any]]:
     """
-    Search for doctors/clinics nearby using a keyword (specialty).
+    Search for clinics nearby. Increased deafult radius to 10km for better results.
     """
-    # We use 'doctor' as the type and the specialty (e.g., 'Cardiologist') as the keyword
-    places_result = self.gmaps.places_nearby(
-      location=(lat, lng),
-      radius=radius_meters,
-      keyword=specialty,
-      type='doctor'
-    )
+    if not self.gmaps:
+      return []
+    
+    # Broaden the keyword to capture both the specialty and the facility
+    search_query = f"{specialty} clinic hospistal"
 
-    doctors = []
+    try:
+      places_result = self.gmaps.places_nearby(
+        location=(lat, lng),
+        radius=radius_meters,
+        keyword=search_query,
+        type='health' # 'health' or 'doctor' are standard Google types
+      )
+
+      doctors = []
+      results = places_result.get('results', [])[:5]
+
+      for place in results:
+        dest_coords = place.get("geometry", {}).get("location")
+
+        # Fetch travel info immediately to provide a complete 'distance'
+
     for place in places_result.get('results', [])[:5]: # Get top 5 results
       doctors.append({
         "name": place.get("name"),
