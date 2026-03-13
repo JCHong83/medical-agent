@@ -37,32 +37,46 @@ class MapsService:
         dest_coords = place.get("geometry", {}).get("location")
 
         # Fetch travel info immediately to provide a complete 'distance'
+        travel = self.get_travel_info((lat, lng), dest_coords)
 
-    for place in places_result.get('results', [])[:5]: # Get top 5 results
-      doctors.append({
-        "name": place.get("name"),
-        "address": place.get("vicinity"),
-        "place_id": place.get("place_id"),
-        "rating": place.get("rating"),
-        "location": place.get("geometry", {}).get("location")
-      })
-    return doctors
+        doctors.append({
+          "name": place.get("name"),
+          "address": place.get("vicinity"),
+          "rating": place.get("rating", 0),
+          "distance": travel["distance"],
+          "duration": travel["duration"],
+          "location": dest_coords,
+          "place_id": place.get("place_id"),
+        })
+
+      return doctors
+    except Exception as e:
+      print(f"Error fetching Google Places: {e}")
+      return []
   
-  def get_travel_info(self, origin: dict, destination_coords: dict):
+  def get_travel_info(self, origin: dict, destination: dict) -> Dict[str, str]:
     """
-    Calculate the distance and time between the patient and a doctor.
+    Calculate distance/time. Using a tuple for origin (lat, lng).
     """
-    matrix = self.gmaps.distance_matrix(
-      origins=origin,
-      destinations=destination_coords,
-      mode="driving"
-    )
-
+    if not self.gmaps or not destination:
+      return {"distance": "N/A", "duration": "N/A"}
+    
     try:
+      matrix = self.gmaps.distance_matrix(
+        origins=[origin],
+        destinations=[(destination['lat'], destination['lng'])],
+        mode="driving"
+      )
+
       element = matrix['rows'][0]['elements'][0]
-      return {
-        "distance": element['distance']['text'],
-        "duration": element['duration']['text']
-      }
-    except (KeyError, IndexError):
-      return {"distance": "Unknown", "duration": "Unknown"}
+
+      if element.get('status') == 'OK':
+        return {
+          "distance": element['distance']['text'],
+          "duration": element['duration']['text']
+        }
+    except Exception:
+      pass
+
+    return {"distance": "Nearby", "duration": "Calculating..."}
+    
