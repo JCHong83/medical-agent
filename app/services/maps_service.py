@@ -8,44 +8,88 @@ class MapsService:
   def __init__(self):
     self.gmaps = googlemaps.Client(key=os.getenv("GOOGLE_MAPS_API_KEY"))
 
-  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 5000):
+    # Mapping English specialties to Italian search terms
+    self.specialty_translations = {
+      "General Practice": "Medico di base",
+      "Pediatrics": "Pediatra",
+      "Dermatology": "Dermatologo",
+      "Dentist": "Dentista",
+      "Emergency": "Pronto Soccorso",
+      "Orthopedics": "Ortopedico",
+      "Gynecology": "Ginecologo",
+      "Psychiatry": "Psichiatra"
+    }
+
+  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 10000):
     """
     Search for doctors/clinics nearby using a keyword (specialty).
     """
+    query_map = {
+      "General Practice": "Medico di base",
+      "Pediatrics": "Pediatra",
+      "Dentist": "Dentista",
+      "Emergency": "Pronto Soccorso",
+    }
+
+    base_term = query_map.get(specialty, specialty)
+
+    # Use a "broad net" query string
+    search_query = f"{base_term} OR Dottore OR Studio Medico"
+
+    print(f"DEBUG: Searching for: {search_query} near {lat}, {lng}")
+
     # We use 'doctor' as the type and the specialty (e.g., 'Cardiologist') as the keyword
-    places_result = self.gmaps.places_nearby(
+    places_result = self.gmaps.places(
+      query=search_query,
       location=(lat, lng),
       radius=radius_meters,
-      keyword=specialty,
-      type='doctor'
+      language='it'
     )
 
+    results = places_result.get('results', [])
+    print(f"DEBUG: Google found {len(results)} raw results.")
+
     doctors = []
-    for place in places_result.get('results', [])[:5]: # Get top 5 results
+    for place in results[:5]: # Get top 5 results
+      dest_coords = place.get("geometry", {}).get("location")
+      travel = self.get_travel_info((lat, lng), dest_coords)
+
+      # Get real-time distance/time for each doctor found
+      travel = self.get_travel_info((lat, lng), dest_coords)
+
       doctors.append({
-        "name": place.get("name"),
-        "address": place.get("vicinity"),
+        "id": place.get("place_id"),
         "place_id": place.get("place_id"),
-        "rating": place.get("rating"),
-        "location": place.get("geometry", {}).get("location")
+        "name": place.get("name"),
+        "address": place.get("formatted_address") or place.get("vicinity"), # Formatted address is for text search
+        "rating": place.get("rating", 0),
+        "category": specialty,
+        "distance": travel["distance"],
+        "isRegistered": False,
+        "location": dest_coords
       })
+
     return doctors
   
-  def get_travel_info(self, origin: dict, destination_coords: dict):
+  def get_travel_info(self, origin: tuple, destination_coords: dict):
     """
     Calculate the distance and time between the patient and a doctor.
     """
-    matrix = self.gmaps.distance_matrix(
-      origins=origin,
-      destinations=destination_coords,
-      mode="driving"
-    )
-
     try:
+      matrix = self.gmaps.distance_matrix(
+        origins=origin,
+        destinations=destination_coords,
+        mode="driving",
+        language="it"
+      )
+
       element = matrix['rows'][0]['elements'][0]
-      return {
-        "distance": element['distance']['text'],
-        "duration": element['duration']['text']
-      }
-    except (KeyError, IndexError):
-      return {"distance": "Unknown", "duration": "Unknown"}
+      if element.get('status') == 'OK':
+        return {
+          "distance": element['distance']['text'],
+          "duration": element['duration']['text']
+        }
+    except Exception as e:
+      print(f"Distance Matrix error: {e}")
+
+    return {"distance": "Calcolo...", "duration": "N/A"}
