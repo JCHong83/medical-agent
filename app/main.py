@@ -4,11 +4,14 @@ from typing import List, Optional
 import os
 from google import genai
 from google.genai import types
-from langchain_core.messages import HumanMessage, AIMessage
+from supabase import create_client, Client
+from langchain_core.messages import HumanMessage
 from app.agents.graph import app as agent_graph
+from app.services.maps_service import MapsService
 from dotenv import load_dotenv
 import uvicorn
 import time
+
 
 load_dotenv()
 
@@ -18,6 +21,11 @@ client = genai.Client(
   http_options={'api_version': 'v1'}
 )
 
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+supabase: Client = create_client(supabase_url, supabase_key)
+
+maps_service = MapsService()
 app = FastAPI(title="Medical AI Agent API")
 
 # --- Request/Response Models ---
@@ -38,8 +46,6 @@ async def run_medical_logic(text_query: str, lat: float, lng: float):
   initial_state = {
     "messages": [HumanMessage(content=text_query)],
     "symptoms": [],
-    "duration": "",
-    "severity": "",
     "emergency_flag": False,
     "specialty_required": "",
     "patient_location": {"lat": lat, "lng": lng},
@@ -48,9 +54,46 @@ async def run_medical_logic(text_query: str, lat: float, lng: float):
 
   # Run the graph
   final_state = await agent_graph.ainvoke(initial_state)
+  specialty = final_state.get("specialty_required", "General Practice")
 
   # Format unified response
   response_text = final_state["messages"][-1].content
+
+  # Fetch internal partners (Supabase)
+  partners = []
+  try:
+    res = supabase.table("profiles") \
+      .select("id, full_name, avatar_url, doctors!inner(specialties, rating, bio), doctor_clinics(clinics(address, name))") \
+      .eq("role", "doctor") \
+      .filter("doctors.verification_status", "eq", "verified") \
+      .filter("doctors.specialties", "cs", f"{{{specialty}}}") \
+      .execute()
+    
+    for doc in res.data:
+      # Extract primary clinic address if exists
+      clinic_info = doc.get("doctor_clinics", [])
+      primary_address = clinic_info[0]["clinics"]["address"] if clinic_info else "Consultazione Online"
+
+      partners.append({
+        "id": doc["id"],
+        "name": doc["full_name"],
+        "avatar": doc["avatar_url"],
+        "specialization": specialty,
+        "rating": doc["doctors"]["rating"] or 5.0,
+        "address": primary_address,
+        "isRegistered": True,
+        "distance": "Partner",
+      })
+  except Exception as e:
+    print(f"❌ Supabase Fetch Error: {e}")
+
+  # Fetch external results (Google Maps)
+  google_results = maps_service.find_nearby_doctors(lat, lng, specialty)
+  for g_doc in google_results:
+    g_doc["isRegistered"] = False
+
+  # Merge Results (Partners first)
+  combined_doctors = partners + google_results
 
   return {
     "status": "success",
@@ -59,14 +102,12 @@ async def run_medical_logic(text_query: str, lat: float, lng: float):
     },
     "diagnosis": {
       "detected_symptoms": final_state.get("symptoms", []),
-      "recommended_specialty": final_state.get("specialty_required", "General")
+      "recommended_specialty": specialty
     },
     "response_text": response_text,
-    "doctors": final_state.get("recommended_doctors", [])
+    "doctors": combined_doctors
   }
 
-
-print(f"Key loaded: {os.getenv('GOOGLE_API_KEY')[:5]}...")
 
 # --- AI model discovery ---
 def find_available_model():
