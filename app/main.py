@@ -62,38 +62,44 @@ async def run_medical_logic(text_query: str, lat: float, lng: float):
   # Fetch internal partners (Supabase)
   partners = []
   try:
-    res = supabase.table("profiles") \
-      .select("id, full_name, avatar_url, doctors!inner(specialties, rating, bio), doctor_clinics(clinics(address, name))") \
-      .eq("role", "doctor") \
-      .filter("doctors.verification_status", "eq", "verified") \
-      .filter("doctors.specialties", "cs", f"{{{specialty}}}") \
+    # Query the 'doctors' table as the primary source
+    # Use .select() with nested joins for profile and clinic info
+    # Use 'ov' (overlap) or 'cs' (contains) for the array filter
+    res = supabase.table("doctors") \
+      .select("id, specialties, bio, years_experience, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address, name))") \
+      .eq("verification_status", "verified") \
+      .filter("specialties", "ov", f"{{{specialty}}}") \
       .execute()
     
+    print(f"DEBUG: Supabase query for '{specialty}' returned {len(res.data)} partners.")
+    
     for doc in res.data:
-      # Extract primary clinic address if exists
-      clinic_info = doc.get("doctor_clinics", [])
-      primary_address = clinic_info[0]["clinics"]["address"] if clinic_info else "Consultazione Online"
+      clinics = doc.get("doctor_clinics", [])
+      addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
 
       partners.append({
         "id": doc["id"],
-        "name": doc["full_name"],
-        "avatar": doc["avatar_url"],
+        "name": doc["profiles"]["full_name"],
+        "avatar": doc["profiles"]["avatar_url"],
         "specialization": specialty,
-        "rating": doc["doctors"]["rating"] or 5.0,
-        "address": primary_address,
+        "rating": 5.0,
+        "address": addr,
         "isRegistered": True,
-        "distance": "Partner",
+        "distance": "Partner M+",
       })
   except Exception as e:
     print(f"❌ Supabase Fetch Error: {e}")
 
   # Fetch external results (Google Maps)
   google_results = maps_service.find_nearby_doctors(lat, lng, specialty)
+
+  sanitized_google = []
   for g_doc in google_results:
     g_doc["isRegistered"] = False
+    sanitized_google.append(g_doc)
 
   # Merge Results (Partners first)
-  combined_doctors = partners + google_results
+  combined_doctors = partners + sanitized_google
 
   return {
     "status": "success",

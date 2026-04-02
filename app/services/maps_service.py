@@ -8,8 +8,14 @@ class MapsService:
   def __init__(self):
     self.gmaps = googlemaps.Client(key=os.getenv("GOOGLE_MAPS_API_KEY"))
 
+
+  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 10000):
+    """
+    Search for doctors/clinics nearby using a keyword (specialty).
+    """
+
     # Mapping English specialties to Italian search terms
-    self.specialty_translations = {
+    query_map = {
       "General Practice": "Medico di base",
       "Pediatrics": "Pediatra",
       "Dermatology": "Dermatologo",
@@ -20,22 +26,10 @@ class MapsService:
       "Psychiatry": "Psichiatra"
     }
 
-  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 10000):
-    """
-    Search for doctors/clinics nearby using a keyword (specialty).
-    """
-    query_map = {
-      "General Practice": "Medico di base",
-      "Pediatrics": "Pediatra",
-      "Dentist": "Dentista",
-      "Emergency": "Pronto Soccorso",
-    }
-
-    base_term = query_map.get(specialty, specialty)
+    base_term = query_map.get(specialty, "Medico")
 
     # Use a "broad net" query string
-    search_query = f"{base_term} OR Dottore OR Studio Medico"
-
+    search_query = f"{base_term}"
     print(f"DEBUG: Searching for: {search_query} near {lat}, {lng}")
 
     # We use 'doctor' as the type and the specialty (e.g., 'Cardiologist') as the keyword
@@ -50,7 +44,7 @@ class MapsService:
     print(f"DEBUG: Google found {len(results)} raw results.")
 
     doctors = []
-    for place in results[:5]: # Get top 5 results
+    for place in results:
       dest_coords = place.get("geometry", {}).get("location")
       travel = self.get_travel_info((lat, lng), dest_coords)
 
@@ -72,6 +66,8 @@ class MapsService:
     return doctors
   
   def get_travel_info(self, origin: tuple, destination_coords: dict):
+    if not destination_coords:
+      return {"distance": "N/D", "duration": "N/D"}
     """
     Calculate the distance and time between the patient and a doctor.
     """
@@ -89,7 +85,7 @@ class MapsService:
           "distance": element['distance']['text'],
           "duration": element['duration']['text']
         }
-    except Exception as e:
-      print(f"Distance Matrix error: {e}")
+    except Exception:
+      pass
 
     return {"distance": "Calcolo...", "duration": "N/A"}
