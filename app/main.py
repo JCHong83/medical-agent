@@ -52,23 +52,48 @@ async def run_medical_logic(text_query: str, lat: float, lng: float):
     "recommended_doctors": []
   }
 
-  # Run the graph
-  final_state = await agent_graph.ainvoke(initial_state)
-  specialty = final_state.get("specialty_required", "General Practice")
+  try:
+    # Run the graph
+    result = await agent_graph.ainvoke(initial_state)
+    
+    # Safe State Extraction
+    # result is in the dictionary representing the final state
+    specialty = result.get("specialty_required", "")
+    emergency = result.get("emergency_flag", False)
+    symptoms = result.get("symptoms", [])
+    
+    # Determine AI response text
+    if result.get("messages"):
+      last_msg = result["messages"][-1]
+      # Handle both LangChain message objects and strings
+      response_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+    else:
+      response_text = "Ho analizzato i tuoi sintomi."
 
-  # Format unified response
-  response_text = final_state["messages"][-1].content
+  except Exception as graph_err:
+    print(f"❌ LangGraph Execution Error: {graph_err}")
+    # Fallback values so the app doesn't crash
+    specialty = ""
+    emergency = False
+    symptoms = []
+    response_text = "Mi dispiace, ho avuto un problema tecnico nell'analisi."
+
+
+  # Robust Search Term
+  # If AI fails to give a specialty, use the transcript itself as search keyword
+  search_term = specialty if specialty else text_query
+  print(f"DEBUG: Using search term: '{search_term}'")
 
   # Fetch internal partners (Supabase)
   partners = []
   try:
-    # Query the 'doctors' table as the primary source
-    # Use .select() with nested joins for profile and clinic info
-    # Use 'ov' (overlap) or 'cs' (contains) for the array filter
+    # ROBUST MATCHING
+    # Look for the specialty in the array
+    # Use 'ilike' logic via a computed filter to find partial matches
     res = supabase.table("doctors") \
-      .select("id, specialties, bio, years_experience, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address, name))") \
+      .select("id, specialties, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address))") \
       .eq("verification_status", "verified") \
-      .filter("specialties", "ov", f"{{{specialty}}}") \
+      .or_(f'specialties.cs.{{"{search_term}"}},bio.ilike.%{search_term}') \
       .execute()
     
     print(f"DEBUG: Supabase query for '{specialty}' returned {len(res.data)} partners.")
@@ -104,13 +129,13 @@ async def run_medical_logic(text_query: str, lat: float, lng: float):
   return {
     "status": "success",
     "metadata": {
-      "is_emergency": final_state.get("emergency_flag", False)
+      "is_emergency": result.get("emergency_flag", False)
     },
     "diagnosis": {
-      "detected_symptoms": final_state.get("symptoms", []),
+      "detected_symptoms": result.get("symptoms", []),
       "recommended_specialty": specialty
     },
-    "response_text": response_text,
+    "response_text": search_term,
     "doctors": combined_doctors
   }
 

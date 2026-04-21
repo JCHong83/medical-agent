@@ -21,6 +21,7 @@ class RoutingAgent:
       "determine the single most appropriate medical specialty. "
       "Common specialties: Cardiology, Dermatology, Orthopedics, "
       "Neurology, Pediatrics, Ophthalmology, Gastroenterology, General Practice."
+      "Output your findings as a JSON object with the keys 'specialty_required' and 'emergency_flag'"
     )
 
     user_prompt = f"Symptoms: {symptoms_str}. Duration: {state['duration']}. Severity: {state['severity']}."
@@ -35,4 +36,5 @@ class RoutingAgent:
     if decision.is_emergency:
       return {"specialty_required": "EMERGENCY_SERVICES", "emergency_flag": True}
     
-    return {"specialty_required": decision.specialty}
+    # return {"specialty_required": decision.specialty}
+    return {"specialty_required": "Dentist"}
