@@ -6,7 +6,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from langchain_core.messages import HumanMessage
-from app.agents.graph import app as agent_graph
+from app.core.graph import app as agent_graph
 from app.services.maps_service import MapsService
 from dotenv import load_dotenv
 import uvicorn

@@ -1,5 +1,5 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
-from app.schemas.state import AgentState, SpecialtyDecision
+from app.core.state import AgentState, SpecialtyDecision
 from dotenv import load_dotenv
 
 load_dotenv()

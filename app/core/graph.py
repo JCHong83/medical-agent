@@ -1,7 +1,6 @@
-# IMPORT DEPENDENCIES
 
 from langgraph.graph import StateGraph, START, END
-from app.schemas.state import AgentState
+from app.core.state import AgentState
 from app.agents.intake_agent import IntakeAgent
 from app.agents.routing_agent import RoutingAgent
 

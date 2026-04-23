@@ -26,3 +26,4 @@ class AgentState(TypedDict):
   specialty_required: str
   patient_location: dict
   recommended_doctors: List[dict]
+  is_gathering_complete: bool

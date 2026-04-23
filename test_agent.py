@@ -1,6 +1,6 @@
 import asyncio
 from langchain_core.messages import HumanMessage
-from app.agents.graph import app # Import the compiled graph
+from app.core.graph import app # Import the compiled graph
 
 async def run_test(user_query: str):
   print(f"\n--- Testing with query: '{user_query}' ---")
