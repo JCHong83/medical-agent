@@ -11,6 +11,10 @@ from app.services.maps_service import MapsService
 from dotenv import load_dotenv
 import uvicorn
 import time
+import re
+from app.services.tts_service import TTSService
+
+tts = TTSService()
 
 
 load_dotenv()
@@ -41,102 +45,100 @@ class AgentRequest(BaseModel):
   lng: Optional[float] = 9.1900
 
 # Helper Function to Run Graph
-async def run_medical_logic(text_query: str, lat: float, lng: float):
+async def run_medical_logic(text_query: str, lat: float, lng: float, history_messages: list):
   # Prepare the initial state with the new message
   initial_state = {
-    "messages": [HumanMessage(content=text_query)],
+    "messages": history_messages,
     "symptoms": [],
     "emergency_flag": False,
     "specialty_required": "",
     "patient_location": {"lat": lat, "lng": lng},
-    "recommended_doctors": []
+    "is_gathering_complete": False # It tracks fi the conversation is done
   }
 
-  try:
-    # Run the graph
-    result = await agent_graph.ainvoke(initial_state)
-    
-    # Safe State Extraction
-    # result is in the dictionary representing the final state
-    specialty = result.get("specialty_required", "")
-    emergency = result.get("emergency_flag", False)
-    symptoms = result.get("symptoms", [])
-    
-    # Determine AI response text
-    if result.get("messages"):
-      last_msg = result["messages"][-1]
-      # Handle both LangChain message objects and strings
-      response_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
-    else:
-      response_text = "Ho analizzato i tuoi sintomi."
+  final_state = await agent_graph.ainvoke(initial_state)
 
-  except Exception as graph_err:
-    print(f"❌ LangGraph Execution Error: {graph_err}")
-    # Fallback values so the app doesn't crash
-    specialty = ""
-    emergency = False
-    symptoms = []
-    response_text = "Mi dispiace, ho avuto un problema tecnico nell'analisi."
+  # Safe State Extraction
+  # result is in the dictionary representing the final state
+  specialty = final_state.get("specialty_required", "")
+  is_done = final_state.get("is_gathering_complete", False)
+  emergency = final_state.get("emergency_flag", False)
 
+  # DEBUG: See what the AI is thinking before we search
+  print(f"DEBUG: AI Specialty Decision: '{specialty}'")
+  
+  # Get the AI's spoken response
+  response_text = "Analisi in corso..."
+  if final_state.get("messages"):
+    last_msg = final_state["messages"][-1]
+    response_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
 
-  # Robust Search Term
-  # If AI fails to give a specialty, use the transcript itself as search keyword
-  search_term = specialty if specialty else text_query
-  print(f"DEBUG: Using search term: '{search_term}'")
+  # Critical Logic: If not done, just return AI text
+  if not is_done and not emergency:
+    return {
+      "status": "success",
+      "diagnosis": {"detected_symptoms": final_state.get("symptoms", []), "recommended_specialty": ""},
+      "response_text": response_text,
+      "doctors": []
+    }
+  
+  # Use the specialty from the AI, fallback to "General Practice" only if truly empty
+  specialty_to_search = specialty if (specialty and specialty != "") else "General Practice"
+
+  # Clean the search term: Remove commas, periods, etc.
+  clean_specialty = re.sub(r'[^\w\s]', '', specialty_to_search).strip()
+
+  print(f"DEBUG: Final Search Specialty: '{clean_specialty}'")
 
   # Fetch internal partners (Supabase)
   partners = []
-  try:
-    # ROBUST MATCHING
-    # Look for the specialty in the array
-    # Use 'ilike' logic via a computed filter to find partial matches
-    res = supabase.table("doctors") \
-      .select("id, specialties, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address))") \
-      .eq("verification_status", "verified") \
-      .or_(f'specialties.cs.{{"{search_term}"}},bio.ilike.%{search_term}') \
-      .execute()
-    
-    print(f"DEBUG: Supabase query for '{specialty}' returned {len(res.data)} partners.")
-    
-    for doc in res.data:
-      clinics = doc.get("doctor_clinics", [])
-      addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
+  if not emergency:
+    try:
+      # Query Supabase using 'ov' (overlap) for the array
+      res = supabase.table("doctors") \
+        .select("id, specialties, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address))") \
+        .eq("verification_status", "verified") \
+        .or_(f'specialties.cs.{{"{clean_specialty}"}},bio.ilike.%{clean_specialty}%') \
+        .execute()
+      
+      
+      for doc in res.data:
+        clinics = doc.get("doctor_clinics", [])
+        addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
 
-      partners.append({
-        "id": doc["id"],
-        "name": doc["profiles"]["full_name"],
-        "avatar": doc["profiles"]["avatar_url"],
-        "specialization": specialty,
-        "rating": 5.0,
-        "address": addr,
-        "isRegistered": True,
-        "distance": "Partner M+",
-      })
-  except Exception as e:
-    print(f"❌ Supabase Fetch Error: {e}")
+        partners.append({
+          "id": doc["id"],
+          "name": doc["profiles"]["full_name"],
+          "avatar": doc["profiles"]["avatar_url"],
+          "specialization": clean_specialty,
+          "rating": 5.0,
+          "address": addr,
+          "isRegistered": True,
+          "distance": "Partner M+",
+        })
+    except Exception as e:
+      print(f"❌ Supabase Error: {e}")
 
   # Fetch external results (Google Maps)
-  google_results = maps_service.find_nearby_doctors(lat, lng, specialty)
+  google_results = maps_service.find_nearby_doctors(lat, lng, clean_specialty)
 
-  sanitized_google = []
+
   for g_doc in google_results:
     g_doc["isRegistered"] = False
-    sanitized_google.append(g_doc)
-
-  # Merge Results (Partners first)
-  combined_doctors = partners + sanitized_google
+    
+  # Generate audio for whatever the AI decided to say
+  audio_base64 = tts.speak(response_text)
 
   return {
     "status": "success",
-    "metadata": {
-      "is_emergency": result.get("emergency_flag", False)
-    },
+    "metadata": {"is_emergency": emergency},
     "diagnosis": {
-      "detected_symptoms": result.get("symptoms", []),
-      "recommended_specialty": specialty
+      "detected_symptoms": final_state.get("symptoms", []),
+      "recommended_specialty": clean_specialty
     },
-    "response_text": search_term,
-    "doctors": combined_doctors
+    "response_text": response_text,
+    "audio": audio_base64,
+    "doctors": partners + google_results if is_done else [],
   }
 
 

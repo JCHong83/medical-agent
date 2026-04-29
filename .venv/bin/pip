@@ -1,4 +1,4 @@
-#!/home/jc/dev/medical-agent/.venv/bin/python3
+#!/home/jc/dev/medical-agent/.venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys

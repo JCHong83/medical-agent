@@ -27,36 +27,49 @@ async def emergency_node(state: AgentState):
   return {"messages": [("ai", msg)], "emergency_flag": True}
 
 
-# DEFINE THE LOGIC (CONDITIONAL EDGES)
+# --- Define Conditional Logic (Edge Functions) ---
 
-def route_decision(state: AgentState):
-  # Match the flag or the specialty string from your RoutingAgent
+def loop_decision(state: AgentState):
+  if state.get("is_gathering_complete"):
+    return "proceed_to_routing"
+  return "ask_user_more"
+
+def triage_decision(state: AgentState):
   if state.get("specialty_required") == "EMERGENCY_SERVICES" or state.get("emergency_flag"):
     return "emergency"
-  return END # We end the graph here and let main.py handle the search
+  return "search"
 
 
 # ASSEMBLE THE GRAPH
 
-# 1. Initialize Graph with our STate schema
+# Initialize Graph with our STate schema
 workflow = StateGraph(AgentState)
 
-# 2. Add Notes
+# Add Nodes
 workflow.add_node("intake", intake_node)
 workflow.add_node("router", routing_node)
 workflow.add_node("emergency", emergency_node)
 
-# 3. Add Edges (The Flow)
+# Add Edges (The Flow)
 workflow.add_edge(START, "intake")
-workflow.add_edge("intake", "router")
 
-# 4. Add Conditional Branching
+# INTAKE -> Loop back to User or Move to Router
 workflow.add_conditional_edges(
   "router",
-  route_decision,
+  loop_decision,
+  {
+    "proceed_to_routing": "router",
+    "ask_user_more": END
+  }
+)
+
+# ROUTER -> Emergency path or Standard search path
+workflow.add_conditional_edges(
+  "router",
+  triage_decision,
   {
     "emergency": "emergency",
-    "search": END # Logic moves back to main.py
+    "search": END
   }
 )
 
