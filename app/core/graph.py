@@ -1,81 +1,58 @@
-
 from langgraph.graph import StateGraph, START, END
 from app.core.state import AgentState
 from app.agents.intake_agent import IntakeAgent
-from app.agents.routing_agent import RoutingAgent
 
-
-# Initialize our components
+# Initialize our component
 intake = IntakeAgent()
-router = RoutingAgent()
 
-
-# DEFINE THE NODES
+# --- NODE FUNCTIONS ---
 
 async def intake_node(state: AgentState):
-  # Gathers and summarizes symptoms
-  return await intake.call_node(state)
-
-async def routing_node(state: AgentState):
-  # Determines if it's an emergency and identifies the specialty
-  return await router.call_node(state)
-
+    # This node now handles both extraction and specialty identification
+    return await intake.call_node(state)
 
 async def emergency_node(state: AgentState):
-  # Match the flag or the specialty string from your RoutingAgent
-  msg ="🚨 URGENZA: I tuoi sintomi suggeriscono un'emergenza. Chiama il 112 o recati al pronto soccorso piu' vicino."
-  return {"messages": [("ai", msg)], "emergency_flag": True}
+    msg = "🚨 URGENZA: I tuoi sintomi suggeriscono un'emergenza. Chiama il 112 o recati al pronto soccorso più vicino."
+    return {"messages": [("ai", msg)], "emergency_flag": True, "is_gathering_complete": True}
 
+# --- CONDITIONAL LOGIC (EDGE FUNCTIONS) ---
 
-# --- Define Conditional Logic (Edge Functions) ---
+def after_intake_decision(state: AgentState):
+    """
+    Determines if we need more info, if it's an emergency, or if we search.
+    """
+    if state.get("emergency_flag") is True:
+        return "emergency"
+    
+    if state.get("is_gathering_complete") is True:
+        return "finish_and_search"
+    
+    # If not finished and no emergency, go to END to wait for next user voice input
+    return "wait_for_user"
 
-def loop_decision(state: AgentState):
-  if state.get("is_gathering_complete"):
-    return "proceed_to_routing"
-  return "ask_user_more"
+# --- ASSEMBLE THE GRAPH ---
 
-def triage_decision(state: AgentState):
-  if state.get("specialty_required") == "EMERGENCY_SERVICES" or state.get("emergency_flag"):
-    return "emergency"
-  return "search"
-
-
-# ASSEMBLE THE GRAPH
-
-# Initialize Graph with our STate schema
 workflow = StateGraph(AgentState)
 
 # Add Nodes
 workflow.add_node("intake", intake_node)
-workflow.add_node("router", routing_node)
 workflow.add_node("emergency", emergency_node)
 
-# Add Edges (The Flow)
+# START -> INTAKE
 workflow.add_edge(START, "intake")
 
-# INTAKE -> Loop back to User or Move to Router
+# INTAKE -> Decide where to go
 workflow.add_conditional_edges(
-  "router",
-  loop_decision,
-  {
-    "proceed_to_routing": "router",
-    "ask_user_more": END
-  }
+    "intake",
+    after_intake_decision,
+    {
+        "emergency": "emergency",
+        "finish_and_search": END, # main.py will see is_gathering_complete=True and trigger search
+        "wait_for_user": END      # main.py will see is_gathering_complete=False and play audio
+    }
 )
 
-# ROUTER -> Emergency path or Standard search path
-workflow.add_conditional_edges(
-  "router",
-  triage_decision,
-  {
-    "emergency": "emergency",
-    "search": END
-  }
-)
-
-# 5. Finish
 workflow.add_edge("emergency", END)
 
 # Compile the graph
 app = workflow.compile()
-

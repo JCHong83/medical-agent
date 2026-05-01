@@ -1,235 +1,265 @@
+import os
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import List, Optional
-import os
+import json
+import re
+import uvicorn
+import time
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from app.core.graph import app as agent_graph
 from app.services.maps_service import MapsService
-from dotenv import load_dotenv
-import uvicorn
-import time
-import re
 from app.services.tts_service import TTSService
-
-tts = TTSService()
-
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-# Configure Gemini for Transcription
+app = FastAPI(title="Medical AI Agent API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+tts = TTSService()
+
 client = genai.Client(
-  api_key=os.getenv("GOOGLE_API_KEY"),
-  http_options={'api_version': 'v1'}
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    http_options={'api_version': 'v1'}
 )
 
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase: Client = create_client(supabase_url, supabase_key)
-
 maps_service = MapsService()
-app = FastAPI(title="Medical AI Agent API")
+
+# --- Helpers ---
+
+def clean_for_speech(text: str) -> str:
+    """Removes technical jargon and cleans text for the TTS engine."""
+    # Remove markdown, brackets, or JSON-like snippets
+    clean = re.sub(r'\{.*\}', '', text)
+    clean = re.sub(r'\[.*\]', '', clean)
+    clean = clean.replace('*', '').replace('#', '').strip()
+    return clean if clean else "Come posso aiutarti?"
 
 # --- Request/Response Models ---
 
 class ChatMessage(BaseModel):
-  role: str # "user" or "assistant"
-  content: str
+    role: str
+    content: str
 
 class AgentRequest(BaseModel):
-  messages: List[ChatMessage]
-  # Optionally allow the frontend to pass current coordinates
-  lat: Optional[float] = 45.4642
-  lng: Optional[float] = 9.1900
+    messages: List[ChatMessage]
+    lat: Optional[float] = 45.4642
+    lng: Optional[float] = 9.1900
 
 # Helper Function to Run Graph
-async def run_medical_logic(text_query: str, lat: float, lng: float, history_messages: list):
-  # Prepare the initial state with the new message
-  initial_state = {
-    "messages": history_messages,
-    "symptoms": [],
-    "emergency_flag": False,
-    "specialty_required": "",
-    "patient_location": {"lat": lat, "lng": lng},
-    "is_gathering_complete": False # It tracks fi the conversation is done
-  }
+async def run_medical_logic(text_query: str, lat: float, lng: float, past_messages: list):
+    formatted_history = []
+    for m in past_messages:
+        content = m.get('content') or ""
+        if m.get('role') == 'user':
+            formatted_history.append(HumanMessage(content=content))
+        else:
+            formatted_history.append(AIMessage(content=content))
 
-  final_state = await agent_graph.ainvoke(initial_state)
+    clean_transcript = text_query if text_query else "..."
+    formatted_history.append(HumanMessage(content=clean_transcript))
 
-  # Safe State Extraction
-  # result is in the dictionary representing the final state
-  specialty = final_state.get("specialty_required", "")
-  is_done = final_state.get("is_gathering_complete", False)
-  emergency = final_state.get("emergency_flag", False)
-
-  # DEBUG: See what the AI is thinking before we search
-  print(f"DEBUG: AI Specialty Decision: '{specialty}'")
-  
-  # Get the AI's spoken response
-  response_text = "Analisi in corso..."
-  if final_state.get("messages"):
-    last_msg = final_state["messages"][-1]
-    response_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
-
-  # Critical Logic: If not done, just return AI text
-  if not is_done and not emergency:
-    return {
-      "status": "success",
-      "diagnosis": {"detected_symptoms": final_state.get("symptoms", []), "recommended_specialty": ""},
-      "response_text": response_text,
-      "doctors": []
+    initial_state = {
+        "messages": formatted_history,
+        "symptoms": [],
+        "emergency_flag": False,
+        "specialty_required": "",
+        "patient_location": {"lat": lat, "lng": lng},
+        "is_gathering_complete": False 
     }
-  
-  # Use the specialty from the AI, fallback to "General Practice" only if truly empty
-  specialty_to_search = specialty if (specialty and specialty != "") else "General Practice"
 
-  # Clean the search term: Remove commas, periods, etc.
-  clean_specialty = re.sub(r'[^\w\s]', '', specialty_to_search).strip()
+    final_state = await agent_graph.ainvoke(initial_state)
 
-  print(f"DEBUG: Final Search Specialty: '{clean_specialty}'")
-
-  # Fetch internal partners (Supabase)
-  partners = []
-  if not emergency:
-    try:
-      # Query Supabase using 'ov' (overlap) for the array
-      res = supabase.table("doctors") \
-        .select("id, specialties, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address))") \
-        .eq("verification_status", "verified") \
-        .or_(f'specialties.cs.{{"{clean_specialty}"}},bio.ilike.%{clean_specialty}%') \
-        .execute()
-      
-      
-      for doc in res.data:
-        clinics = doc.get("doctor_clinics", [])
-        addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
-
-        partners.append({
-          "id": doc["id"],
-          "name": doc["profiles"]["full_name"],
-          "avatar": doc["profiles"]["avatar_url"],
-          "specialization": clean_specialty,
-          "rating": 5.0,
-          "address": addr,
-          "isRegistered": True,
-          "distance": "Partner M+",
-        })
-    except Exception as e:
-      print(f"❌ Supabase Error: {e}")
-
-  # Fetch external results (Google Maps)
-  google_results = maps_service.find_nearby_doctors(lat, lng, clean_specialty)
-
-
-  for g_doc in google_results:
-    g_doc["isRegistered"] = False
+    specialty = final_state.get("specialty_required", "")
+    is_done = final_state.get("is_gathering_complete", False)
+    emergency = final_state.get("emergency_flag", False)
     
-  # Generate audio for whatever the AI decided to say
-  audio_base64 = tts.speak(response_text)
+    # IMPROVED: Extract Response Text safely to avoid the "Come posso aiutarti" glitch
+    response_text = ""
+    if final_state.get("messages"):
+        last_msg = final_state["messages"][-1]
+        response_text = last_msg.content if hasattr(last_msg, 'content') else str(last_msg)
+    
+    # Fallback if text is empty or too short
+    if len(response_text) < 5:
+        response_text = "Ho capito. Cerco subito lo specialista più adatto."
 
-  return {
-    "status": "success",
-    "metadata": {"is_emergency": emergency},
-    "diagnosis": {
-      "detected_symptoms": final_state.get("symptoms", []),
-      "recommended_specialty": clean_specialty
-    },
-    "response_text": response_text,
-    "audio": audio_base64,
-    "doctors": partners + google_results if is_done else [],
-  }
+    response_text = clean_for_speech(response_text)
 
+    # Intermediate response (Still gathering info)
+    if not is_done and not emergency:
+        return {
+            "status": "success",
+            "diagnosis": {"detected_symptoms": final_state.get("symptoms", []), "recommended_specialty": ""},
+            "response_text": response_text,
+            "audio": tts.speak(response_text),
+            "doctors": []
+        }
+    
+    # We map the Italian output of the AI to your specific DB strings
+    specialty_map = {
+        "dentista": "Dentist",
+        "odontoiatra": "Dentist",
+        "pediatra": "Pediatrics",
+        "cardiologo": "Cardiology",
+        "ortopedico": "Orthopedics", # Add this
+        "dermatologo": "Dermatology", # Add this
+        "medico di base": "General Practice"
+    }
+
+    # Normalize AI output to find matches in DB
+    normalized_input = specialty.lower().strip()
+    # Map it, or default to Title Case if not in map
+    db_specialty = specialty_map.get(normalized_input, specialty.title() if specialty else "General Practice")
+    clean_specialty = re.sub(r'[^\w\s]', '', db_specialty).strip()
+
+    print(f"DEBUG: AI said '{specialty}', Searching DB for '{clean_specialty}'")
+
+    partners = []
+    if not emergency:
+        try:
+            # We search for the mapped English term in your array
+            res = supabase.table("doctors") \
+                .select("id, specialties, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address))") \
+                .eq("verification_status", "verified") \
+                .or_(f'specialties.cs.{{ "{clean_specialty}" }}, bio.ilike.%{clean_specialty}%') \
+                .execute()
+            
+            for doc in res.data:
+                clinics = doc.get("doctor_clinics", [])
+                addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
+                partners.append({
+                    "id": doc["id"],
+                    "name": doc["profiles"]["full_name"],
+                    "avatar": doc["profiles"]["avatar_url"],
+                    "specialization": clean_specialty,
+                    "rating": 5.0,
+                    "address": addr,
+                    "isRegistered": True,
+                    "distance": "Partner M+",
+                })
+        except Exception as e:
+            print(f"❌ Supabase Error: {e}")
+
+    google_results = maps_service.find_nearby_doctors(lat, lng, clean_specialty)
+    for g_doc in google_results:
+        g_doc["isRegistered"] = False
+        
+    final_audio = tts.speak(response_text)
+
+    return {
+        "status": "success",
+        "metadata": {"is_emergency": emergency},
+        "diagnosis": {
+            "detected_symptoms": final_state.get("symptoms", []),
+            "recommended_specialty": clean_specialty
+        },
+        "response_text": response_text,
+        "audio": final_audio,
+        "doctors": partners + google_results if is_done else [],
+    }
 
 # --- AI model discovery ---
 def find_available_model():
-  print("🔍 Scanning for available Gemini models...")
-  try:
-    # List all models available to your specific API key
-    for m in client.models.list():
-      # Check for the modern Flash models first
-      # We want models that support 'generateContent'
-      if 'generateContent' in m.supported_actions:
-        # Prioritize 2.0 or 1.5 Flash
-        if "flash" in m.name.lower():
-          return m.name.split('/')[-1]
-        
-  except Exception as e:
-    print(f"❌ Scanner Error: {e}")
+    print("🔍 Scanning for available Gemini models...")
+    # List of models in order of preference (Newest/Best first)
+    preferred_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    try:
+        available = [m.name.split('/')[-1] for m in client.models.list() if 'generateContent' in m.supported_actions]
+        for model in preferred_models:
+            if model in available:
+                return model
+    except Exception as e:
+        print(f"❌ Scanner Error: {e}")
 
-  return "gemini-1.5-flash" # Safe fallback
+    return "gemini-2.0-flash" # Your baseline working model
 
 ACTIVE_MODEL = find_available_model()
-print(f"🚀 Currently Using Model: {ACTIVE_MODEL}")
 
 # --- Endpoints ---
 
-@app.post("/chat")
-async def chat_with_agent(request: AgentRequest):
-  try:
-    last_user_msg = request.messages[-1].content if request.messages else ""
-    return await run_medical_logic(last_user_msg, request.lat, request.lng)
-  
-  except Exception as e:
-    raise HTTPException(status_code=500, detail=str(e))
-  
 @app.post("/voice-command")
 async def voice_command(
-  file: UploadFile = File(...),
-  lat: float = Form(...),
-  lng: float = Form(...),
-  user_id: str = Form(None)
+    file: UploadFile = File(None),
+    lat: float = Form(...),
+    lng: float = Form(...),
+    history: str = Form("[]"),
+    user_id: str = Form(None)
 ):
-  # Checking if the GPS is working correctly
-  print(f"📍 GPS RECEIVED FROM PHONE: {lat}, {lng}")
+    past_messages = json.loads(history)
+    transcript = "" 
 
-  try:
-    # Read the audio bytes directly
-    audio_data = await file.read()
+    # Greeting Logic (Centralized)
+    is_greeting = (file is None or file.filename == "greeting.txt") and len(past_messages) == 0
 
-    # Retry logic for 503 errors
-    for attempt in range(3):
-      try:
-        response = client.models.generate_content(
-          model=ACTIVE_MODEL,
-          contents=[
-            "Transcribe the medical symptoms accurately. Return only the text.",
-            types.Part.from_bytes(
-              data=audio_data,
-              mime_type="audio/mp4"
-            )
-          ]
-        )
-        break # Success! Exit the loop
-      except Exception as e:
-        if "503" in str(e) and attempt < 2:
-          print(f"⚠️ Server busy (503). Retrying in {attempt + 1}s...")
-          time.sleep(attempt + 1)
-          continue
-        raise e
+    if is_greeting:
+        greeting_text = "Ciao! Sono il tuo assistente MedicalPlus. Descrivi i tuoi sintomi e ti aiuterò a trovare lo specialista più adatto."
+        return {
+            "status": "success",
+            "response_text": greeting_text,
+            "transcript": "",
+            "audio": tts.speak(greeting_text),
+            "is_gathering_complete": False,
+            "doctors": [],
+            "diagnosis": {"recommended_specialty": ""}
+        }
+    
+    try:
+        if file and file.filename != "greeting.txt":
+            audio_data = await file.read()
+            for attempt in range(3):
+                try:
+                    response = client.models.generate_content(
+                        model=ACTIVE_MODEL,
+                        contents=[
+                            "Trascrivi accuratamente i sintomi medici. Restituisci solo il testo.",
+                            types.Part.from_bytes(data=audio_data, mime_type="audio/mp4")
+                        ]
+                    )
+                    transcript = response.text.strip() if response.text else ""
+                    break
+                except Exception as e:
+                    if "503" in str(e) and attempt < 2:
+                        time.sleep(attempt + 1)
+                        continue
+                    raise e
 
-    transcript = response.text.strip() if response.text else ""
-    print(f"✅ Decoded Transcript: {transcript}")
-    return await run_medical_logic(response.text, lat, lng)
-  
+        print(f"✅ Decoded Transcript: {transcript}")
+        result = await run_medical_logic(transcript, lat, lng, past_messages)
+        result["transcript"] = transcript
+        return result
 
-  except Exception as e:
-    error_msg = str(e)
-    print(f"❌ Error: {error_msg}")
-
-    return {
-      "status": "error",
-      "metadata": {"is_emergency": False},
-      "diagnosis": {"detected_symptoms": [], "recommended_specialty": ""},
-      "response_text": f"Sorry, I encountered an error: {error_msg}",
-      "doctors": []
-    }
-
+    except Exception as e:
+        print(f"❌ Voice Error: {str(e)}")
+        fallback_text = "Scusa, ho avuto difficoltà a capire. Puoi ripetere i sintomi?"
+        return {
+            "status": "error",
+            "metadata": {"is_emergency": False},
+            "diagnosis": {"detected_symptoms": [], "recommended_specialty": ""},
+            "response_text": fallback_text,
+            "audio": tts.speak(fallback_text),
+            "doctors": []
+        }
 
 @app.get("/health")
 async def health():
-  return {"status": "healthy"}
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
-  uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
