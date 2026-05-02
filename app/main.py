@@ -113,36 +113,50 @@ async def run_medical_logic(text_query: str, lat: float, lng: float, past_messag
     
     # We map the Italian output of the AI to your specific DB strings
     specialty_map = {
-        "dentista": "Dentist",
-        "odontoiatra": "Dentist",
-        "pediatra": "Pediatrics",
-        "cardiologo": "Cardiology",
-        "ortopedico": "Orthopedics", # Add this
-        "dermatologo": "Dermatology", # Add this
-        "medico di base": "General Practice"
+        "dentista": ["Dentist", "Dentista", "Odontoiatria"],
+        "odontoiatra": ["Dentist", "Dentista", "Odontoiatria"],
+        "pediatra": ["Pediatrics", "Pediatra", "Pediatria"],
+        "cardiologo": ["Cardiology", "Cardiologo", "Cardiologia"],
+        "ortopedico": ["Orthopedics", "Ortopedico", "Ortopedia"],
+        "dermatologo": ["Dermatology", "Dermatologo", "Dermatologia"],
+        "medico di base": ["General Practice", "Medico di base", "Medicina Generale"]
     }
 
     # Normalize AI output to find matches in DB
     normalized_input = specialty.lower().strip()
-    # Map it, or default to Title Case if not in map
-    db_specialty = specialty_map.get(normalized_input, specialty.title() if specialty else "General Practice")
-    clean_specialty = re.sub(r'[^\w\s]', '', db_specialty).strip()
+    search_terms = specialty_map.get(normalized_input, [specialty.title() if specialty else "General Practice"])
+    
+    clean_specialty = re.sub(r'[^\w\s]', '', search_terms[0]).strip()
 
     print(f"DEBUG: AI said '{specialty}', Searching DB for '{clean_specialty}'")
 
     partners = []
-    if not emergency:
+    if not emergency and is_done:
         try:
+            or_filter = ",".join([f'specialties.cs.{{ "{term}" }}' for term in search_terms])
+            or_filter += f',bio.ilike.%{clean_specialty}%'
+            # DEBUG: Log exact values before query
+            print(f"DEBUG: Executing Supabase query for specialty: {clean_specialty}")
+
             # We search for the mapped English term in your array
             res = supabase.table("doctors") \
-                .select("id, specialties, profiles!inner(full_name, avatar_url), doctor_clinics(clinics(address))") \
+                .select("""id, specialties, profiles(full_name, avatar_url), doctor_clinics(clinics(address))""") \
                 .eq("verification_status", "verified") \
-                .or_(f'specialties.cs.{{ "{clean_specialty}" }}, bio.ilike.%{clean_specialty}%') \
+                .or_(or_filter) \
                 .execute()
             
+            print(f"DEBUG: Supabase returned {len(res.data)} rows for terms {search_terms}")
+            
             for doc in res.data:
+                # Log if profiles or clinics are missing (common RLS issue)
+                if not doc.get("profiles"):
+                    print(f"⚠️ Warning: Doctor {doc['id']} found but 'profiles' is null (RLS?)")
+                    continue
+
                 clinics = doc.get("doctor_clinics", [])
-                addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
+                addr = clinics[0]["clinics"]["address"] if clinics and clinics[0].get("clinics") else "Milano, Italia"
+                
+
                 partners.append({
                     "id": doc["id"],
                     "name": doc["profiles"]["full_name"],
