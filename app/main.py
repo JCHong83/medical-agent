@@ -48,7 +48,7 @@ def clean_for_speech(text: str) -> str:
     clean = re.sub(r'\{.*\}', '', text)
     clean = re.sub(r'\[.*\]', '', clean)
     clean = clean.replace('*', '').replace('#', '').strip()
-    return clean if clean else "Come posso aiutarti?"
+    return clean if clean else "How can I help you?"
 
 # --- Request/Response Models ---
 
@@ -60,6 +60,14 @@ class AgentRequest(BaseModel):
     messages: List[ChatMessage]
     lat: Optional[float] = 45.4642
     lng: Optional[float] = 9.1900
+
+# --- Manual Search Model ---
+class ManualSearchRequest(BaseModel):
+    specialty: str
+    location: Optional[str] = None
+    lat: float
+    lng: float
+    radius: int = 5
 
 # Helper Function to Run Graph
 async def run_medical_logic(text_query: str, lat: float, lng: float, past_messages: list):
@@ -97,7 +105,7 @@ async def run_medical_logic(text_query: str, lat: float, lng: float, past_messag
     
     # Fallback if text is empty or too short
     if len(response_text) < 5:
-        response_text = "Ho capito. Cerco subito lo specialista più adatto."
+        response_text = "I understand. I am looking for the most suitable specialist for you."
 
     response_text = clean_for_speech(response_text)
 
@@ -113,13 +121,13 @@ async def run_medical_logic(text_query: str, lat: float, lng: float, past_messag
     
     # We map the Italian output of the AI to your specific DB strings
     specialty_map = {
-        "dentista": ["Dentist", "Dentista", "Odontoiatria"],
-        "odontoiatra": ["Dentist", "Dentista", "Odontoiatria"],
-        "pediatra": ["Pediatrics", "Pediatra", "Pediatria"],
-        "cardiologo": ["Cardiology", "Cardiologo", "Cardiologia"],
-        "ortopedico": ["Orthopedics", "Ortopedico", "Ortopedia"],
-        "dermatologo": ["Dermatology", "Dermatologo", "Dermatologia"],
-        "medico di base": ["General Practice", "Medico di base", "Medicina Generale"]
+        "dentist": ["Dentist", "Dentista", "Odontoiatria"],
+        "cardiologist": ["Cardiology", "Cardiologo", "Cardiologia"],
+        "pediatrician": ["Pediatrics", "Pediatra", "Pediatria"],
+        "orthopedist": ["Orthopedics", "Ortopedico", "Ortopedia"],
+        "dermatologist": ["Dermatology", "Dermatologo", "Dermatologia"],
+        "general practitioner": ["General Practice", "Medico di base", "Medicina Generale"],
+        "gynaecologist": ["Gynecology", "Ginecologo", "Ginecologia"]
     }
 
     # Normalize AI output to find matches in DB
@@ -170,7 +178,7 @@ async def run_medical_logic(text_query: str, lat: float, lng: float, past_messag
         except Exception as e:
             print(f"❌ Supabase Error: {e}")
 
-    google_results = maps_service.find_nearby_doctors(lat, lng, clean_specialty)
+    google_results = maps_service.find_nearby_doctors(lat, lng, clean_specialty, radius=5000)
     for g_doc in google_results:
         g_doc["isRegistered"] = False
         
@@ -223,7 +231,7 @@ async def voice_command(
     is_greeting = (file is None or file.filename == "greeting.txt") and len(past_messages) == 0
 
     if is_greeting:
-        greeting_text = "Ciao! Sono il tuo assistente MedicalPlus. Descrivi i tuoi sintomi e ti aiuterò a trovare lo specialista più adatto."
+        greeting_text = "Hello! I am your MedicalPlus assistant. Please describe your symptoms, and I will help you find the right specialist."
         return {
             "status": "success",
             "response_text": greeting_text,
@@ -242,7 +250,7 @@ async def voice_command(
                     response = client.models.generate_content(
                         model=ACTIVE_MODEL,
                         contents=[
-                            "Trascrivi accuratamente i sintomi medici. Restituisci solo il testo.",
+                            "Accurately transcribe the medical symptoms spoken in this audio. Return only the text in English.",
                             types.Part.from_bytes(data=audio_data, mime_type="audio/mp4")
                         ]
                     )
@@ -261,7 +269,7 @@ async def voice_command(
 
     except Exception as e:
         print(f"❌ Voice Error: {str(e)}")
-        fallback_text = "Scusa, ho avuto difficoltà a capire. Puoi ripetere i sintomi?"
+        fallback_text = "I'm sorry, I had trouble understanding that. Could you please repeat your symptoms?"
         return {
             "status": "error",
             "metadata": {"is_emergency": False},
@@ -270,6 +278,63 @@ async def voice_command(
             "audio": tts.speak(fallback_text),
             "doctors": []
         }
+    
+
+# --- Endpoint for Manual Search ---
+@app.post("/manual-search")
+async def manual_search(req: ManualSearchRequest):
+    try:
+        specialty_lookup = {
+            "dentist": ["Dentist", "Dentista", "Odontoiatria"],
+            "cardiologist": ["Cardiology", "Cardiologo", "Cardiologia"],
+            "pediatrician": ["Pediatrics", "Pediatra", "Pediatria"],
+            "general practitioner": ["General Practice", "Medico di base"]
+        }
+
+        normalized_input = req.specialty.lower().strip()
+        search_terms = specialty_lookup.get(normalized_input, [req.specialty.title()])
+        primary_term = search_terms[0]
+
+        # Search Supabase
+        or_filter = ",".join([f'specialties.cs.{{ "{term}" }}' for term in search_terms])
+        res = supabase.table("doctors") \
+            .select("id, specialties, profiles(full_name, avatar_url), doctor_clinics(clinics(address))") \
+            .eq("verification_status", "verified") \
+            .or_(or_filter) \
+            .execute()
+        
+        partners = []
+        for doc in res.data:
+            clinics = doc.get("doctor_clinics", [])
+            addr = clinics[0]["clinics"]["address"] if clinics else "Milano, Italia"
+            partners.append({
+                "id": doc["id"],
+                "name": doc["profiles"]["full_name"],
+                "avatar": doc["profiles"]["avatar_url"],
+                "specialization": primary_term,
+                "rating": 5.0,
+                "address": addr,
+                "isRegistered": True,
+                "distance": "Partner M+"
+            })
+        
+        # 3. Search Google Maps (Pass the radius from the request)
+        # Assuming maps_service.find_nearby_doctors accepts a radius param
+        google_results = maps_service.find_nearby_doctors(req.lat, req.lng, primary_term, radius=req.radius * 1000)
+        
+        for g_doc in google_results:
+            g_doc["isRegistered"] = False
+
+        return {
+            "status": "success",
+            "doctors": partners + google_results,
+            "diagnosis": {"recommended_specialty": primary_term}
+        }
+    
+    except Exception as e:
+        print(f"Manual Search Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/health")
 async def health():

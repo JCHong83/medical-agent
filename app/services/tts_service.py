@@ -8,8 +8,8 @@ class TTSService:
         # Ensure your GOOGLE_APPLICATION_CREDENTIALS env var is set
         self.client = texttospeech.TextToSpeechClient()
         self.voice = texttospeech.VoiceSelectionParams(
-            language_code="it-IT",
-            name="it-IT-Neural2-A", # High-quality female Italian voice
+            language_code="en-US",
+            name="en-US-Neural2-F", # High-quality female Italian voice
             ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
         )
         self.audio_config = texttospeech.AudioConfig(
@@ -22,7 +22,7 @@ class TTSService:
         try:
             # 1. Validation: Ensure text is a string and not empty
             if not text or not isinstance(text, str):
-                text = "Mi dispiace, c'è stato un errore nel caricamento del messaggio."
+                text = "I am sorry, there was an error loading the message."
 
             # 2. Safety Gate: Clean text of any accidental Markdown or special chars
             # This prevents the TTS from literally reading things like "**" or "###"

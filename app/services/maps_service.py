@@ -9,7 +9,7 @@ class MapsService:
     self.gmaps = googlemaps.Client(key=os.getenv("GOOGLE_MAPS_API_KEY"))
 
 
-  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius_meters: int = 10000):
+  def find_nearby_doctors(self, lat: float, lng: float, specialty: str, radius: int = 5000):
     """
     Search for doctors/clinics nearby using a keyword (specialty).
     """
@@ -30,13 +30,13 @@ class MapsService:
 
     # Use a "broad net" query string
     search_query = f"{base_term}"
-    print(f"DEBUG: Searching for: {search_query} near {lat}, {lng}")
+    print(f"DEBUG: Searching for: {search_query} near {lat}, {lng} with radius {radius}")
 
     # We use 'doctor' as the type and the specialty (e.g., 'Cardiologist') as the keyword
     places_result = self.gmaps.places(
       query=search_query,
       location=(lat, lng),
-      radius=radius_meters,
+      radius=radius,
       language='it'
     )
 
