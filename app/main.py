@@ -9,14 +9,17 @@ import uvicorn
 import time
 from google import genai
 from google.genai import types
-from supabase import create_client, Client
+
 from langchain_core.messages import HumanMessage, AIMessage
 from app.core.graph import app as agent_graph
 from app.services.maps_service import MapsService
 from app.services.tts_service import TTSService
 from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv()
+from app.core.supabase_client import supabase
+
+from app.routes import appointment_routes
+
 
 app = FastAPI(title="Medical AI Agent API")
 
@@ -35,9 +38,6 @@ client = genai.Client(
     http_options={'api_version': 'v1'}
 )
 
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-supabase: Client = create_client(supabase_url, supabase_key)
 maps_service = MapsService()
 
 # --- Helpers ---
@@ -342,3 +342,6 @@ async def health():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# logic for Appointment Booking
+app.include_router(appointment_routes.router)
