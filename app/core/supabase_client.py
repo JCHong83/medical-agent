@@ -8,6 +8,6 @@ url = os.getenv("SUPABASE_URL")
 key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 if not url or not key:
-  raise ValueError("Supabse credentials missing in .env")
+  raise ValueError("Supabse URL or Key missing in environment variables.")
 
 supabase: Client = create_client(url, key)
