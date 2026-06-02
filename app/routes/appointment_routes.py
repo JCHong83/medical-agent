@@ -15,6 +15,13 @@ class BookingRequest(BaseModel):
   start_ts: str # ISO Format: 2026-05-20T10:30:00Z
   notes: Optional[str] = None
 
+class ServiceCreateRequest(BaseModel):
+  doctor_id: str
+  name: str
+  description: Optional[str] = None
+  duration_minutes: int
+  price: float
+
 router = APIRouter(prefix="/appointments", tags=["Appointments"])
 
 @router.get("/slots/{doctor_id}")
@@ -115,4 +122,40 @@ async def book_appointment(req: BookingRequest):
     print(f"Booking Error: {e}")
     if "overlap" in str(e).lower():
       raise HTTPException(status_code=409, detail="This time slot was just taken. Please choose another.")
+    raise HTTPException(status_code=500, detail=str(e))
+  
+
+# Appointmenting logic
+@router.get("/services/{doctor_id}")
+async def get_doctor_services(doctor_id: str):
+  res = supabase.table("doctor_services")\
+    .select("*")\
+    .eq("doctor_id", doctor_id)\
+    .eq("is_active", True)\
+    .execute()
+  return {"services": res.data}
+
+
+@router.post("/services")
+async def create_doctor_service(req: ServiceCreateRequest):
+  try:
+    data = {
+      "doctor_id": req.doctor_id,
+      "name": req.name,
+      "description": req.description,
+      "duration_minutes": req.duration_minutes,
+      "price": req.price,
+      "is_active": True
+    }
+    res = supabase.table("doctor_services").insert(data).execute()
+    return {"status": "success", "service": res.data[0]}
+  except Exception as e:
+    raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/services/{service_id}")
+async def delete_doctor_service(service_id: str):
+  try:
+    supabase.table("doctor_services").delete().eq("id", service_id).execute()
+    return {"status": "success", "message": "Service deleted"}
+  except Exception as e:
     raise HTTPException(status_code=500, detail=str(e))
